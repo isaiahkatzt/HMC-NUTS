@@ -1,0 +1,462 @@
+---
+title: "PSTAT 232 Final: Interactive Code"
+author: "Isaiah Katz, Jason Sandoval, Kelli Woodward"
+output: html_notebook
+---
+
+#### Required Libraries, RNG Initialization  
+
+```{r LIBRARIES}
+library(mvtnorm)
+library(tidyverse)
+library(sets)
+library(patchwork)
+
+set.seed(24) 
+```
+
+#### Example 1: Random Walk Metropolis algorithm (Section 2.1)
+
+The code below is used to generate random samples from a 10-dimensional multivariate Gaussian distribution with randomly generated covariance matrix. We first define the appropriate covariance matrix, target distribution $p$, and proposal distribution $q_{symm}$. 
+
+```{r RANDOM WALK METROPOLIS INPUTS}
+# establish mean and covariance structure of target distribution 
+d = 10
+cov.generator = matrix(runif(d * d,0,1), nrow = d, ncol = d)
+cov <- cov.generator %*% t(cov.generator)
+mu = numeric(d)
+  
+p <- function(x) {
+  dmvnorm(x, mean = mu, sigma = cov)
+}
+
+q_symm <- function(x) { 
+  return(rmvnorm(1, mean = x, sigma = diag(d)))
+}
+```
+
+Code below defines the Random Walk Metropolis algorithm for user-specified target distribution, proposal distribution, starting point (defaulting to a vector of zeros), burn-in period (defaulting to 10000 samples), and iterations (defaulting to 100000 samples).
+
+```{r RANDOM WALK METROPOLIS}
+rw_metropolis <- function(target_dist, prop_dist, x = rep(0, d), 
+                          burn = 1e4, iters = 1e5) {
+  
+  # output storage for later convergence analysis 
+  samples <- matrix(numeric(iters * d), nrow = iters, ncol = d)
+
+  for (i in 1:iters) { 
+    
+    # sample from proposed distribution
+    z <- prop_dist(x)
+    
+    # calculate acceptance probability 
+    alpha <- target_dist(z) / target_dist(x) 
+    r <- min(1, alpha)
+    
+    #  determine acceptance / rejection 
+    u <- runif(1)
+    
+    if (r > u) {
+      x <- z
+    }
+    samples[i, ] <- x 
+  }
+  samples <- samples[-c(seq(1,burn)),]
+  return(samples)
+}
+```
+
+Samples are stored for later reference. 
+
+```{r STORING SAMPLES}
+samples <- rw_metropolis(p, q_symm)
+```
+
+#### Example 2: Concentration of Measure (Section 2.2)
+
+The following code determines the minimum Euclidean distance between an arbitrary point within a d-dimensional unit hypercube and the respective boundary and equator of the cube. 
+
+```{r BOUNDARY AND EQUATOR DISTANCE FUNCTIONS}
+# distance from boundary function 
+boundary_dist <- function(d_point) { 
+  inverses <- rep(1, length(d_point)) - d_point
+  return(min(min(inverses), min(d_point)))
+  }
+
+# distance from equator function 
+equator_dist <- function(d_point) {
+  dotprod <- rep(1, length(d_point)) %*% d_point
+  return(abs(dotprod/length(d_point) - 0.5))
+  }
+```
+
+Using the results of the boundary and equator distance functions, the next section of code defines functions for sampling points within the d-dimensional hypercube and determining whether they fall within the annnulus and / or meridian of the space. 
+
+```{r SIMULATION FUNCTIONS}
+# Simulation functions 
+simulate_x <- function(d, iters) {
+  points_matrix <- matrix(runif(d*iters), nrow = iters, ncol = d)
+  boundary_dists <- apply(points_matrix, MARGIN = 1, FUN = boundary_dist)
+  equator_dists <- apply(points_matrix, MARGIN = 1, FUN = equator_dist)
+  return(data.frame(boundary_dists, equator_dists))
+}
+
+annulus_vol_est <- function(r, boundary_dists) {
+  annulus_points <- boundary_dists[boundary_dists <= r]
+  annulus_vol <- length(annulus_points) / length(boundary_dists)
+  return(annulus_vol)
+}
+
+meridian_vol_est <- function(r, equator_dists) { 
+  meridian_points <- equator_dists[equator_dists <= r]
+  meridian_vol <- length(meridian_points) / length(equator_dists)
+  return(meridian_vol)
+}
+
+# intersection calculation functions 
+intersection <- function(r, annulus_equator_dists, dim) {
+  int_vals <- annulus_equator_dists %>% 
+    filter((boundary_dists <= r) & (equator_dists <= r))
+  return(int_vals)
+  }
+
+intersect_vol_est <- function(r, dists, dim) {
+  intersect_points <- intersection(r, dists, dim)
+  intersect_vol <- length(intersect_points[,1]) / length(dists[,1])
+  }
+```
+
+This code samples 100000 4-, 16-, 64-, and 256-dimensional points from within a unit hypercube. It then returns the proportion of these points lying within the cube's meridian, annulus, and intersection between the two. 
+
+```{r SIMULATIONS}
+iters = 1e5
+r = .05
+dists4 <- simulate_x(4, iters)
+dists16 <- simulate_x(16, iters)
+dists64 <- simulate_x(64, iters)
+dists256 <- simulate_x(256,iters)
+
+annulus_vols <- c(annulus_vol_est(r, dists4$boundary_dists), 
+                  annulus_vol_est(r, dists16$boundary_dists), 
+                  annulus_vol_est(r, dists64$boundary_dists), 
+                  annulus_vol_est(r, dists256$boundary_dists))
+meridian_vols <- c(meridian_vol_est(r, dists4$equator_dists), 
+                   meridian_vol_est(r, dists16$equator_dists), 
+                   meridian_vol_est(r, dists64$equator_dists), 
+                   meridian_vol_est(r, dists256$equator_dists))
+int_vols <- c(intersect_vol_est(r, dists4, 4), 
+              intersect_vol_est(r, dists16, 16), 
+              intersect_vol_est(r, dists64, 64), 
+              intersect_vol_est(r, dists256, 256))
+
+meridian_vols
+annulus_vols
+int_vols
+```
+
+#### Example 3: Hamiltonian Monte Carlo (Section 4.1) 
+
+This code defines present dimension, mean, and variance parameters for a target distribution of interest (here the 10-dimensional multivariate normal with mean $\boldsymbol{\mu} = \boldsymbol{5}$ and randomly generated covariance). It then defines functions to generate the log-likelihood and gradient log-likelihood of the target. 
+
+```{r HMC HELPER FUNCTIONS}
+
+# user-defined presets; specific to this portion of the notebook
+d = 10
+mu <- rep(5, d)
+sigma <- rWishart(n = 1,Sigma = diag(d), df = 1.5 * d)[,,1]
+
+# log of our target density 
+log_dist <- function(x, mu = rep(5, d) , sigma = diag(d)) {
+  x <- as.matrix(x, nrow = length(x))
+  mu <- as.matrix(mu, nrow = length(mu))
+  dist <- ((- 1 / 2) * t((x - mu)) %*% solve(sigma) %*% (x - mu))
+  return(dist)
+}
+
+# gradient of our log target density  
+grad_log <- function(x, mu = rep(5,d), sigma = diag(d)) {
+  x <- as.matrix(x,nrow = length(x))
+  mu <- as.matrix(mu,nrow = length(mu))
+  gradient <- - (solve(sigma) %*% (x - mu))
+  return(gradient)
+}
+
+# helper function to return both gradient and log density 
+both <- function(x, m = rep(5, d) , s = sigma){
+  dist <- log_dist(x, m, s)
+  gradient <- grad_log(x, m, s)
+  return(list(dist,gradient))
+}
+```
+
+The code below implements Hamiltonian Monte Carlo for generic starting parameters. Changing the target distribution will require modifications to both the helper functions above and the mean and covariance structure in the implementation below.  
+
+```{r IMPLEMENTATION OF HMC}
+hamiltonian_mc <- function(M, burnin, theta_0, mass_matrix, L, eps, mu, sigma, d) {
+    
+    # initialize starting values 
+    accepts <- rep(0, M + burnin)
+    samps <- matrix(0, nrow = M + burnin, ncol = d)
+    theta <- theta_0
+    
+    # primary loop 
+    for (iter in 1:(M + burnin)) {
+      theta_tilde <- theta
+      r <- rmvnorm(1, mean = rep(0, length(theta_0)), sigma = mass_matrix)
+      r_tilde <- t(r)
+      
+      # leapfrog integration 
+      for (j in 1:L) {
+        r_tilde <- r_tilde + ((eps / 2) * grad_log(theta_tilde, mu, sigma))
+        theta_tilde <- theta_tilde + (eps * solve(mass_matrix) %*% r_tilde)
+        r_tilde <- r_tilde + ((eps / 2) * grad_log(theta_tilde, mu, sigma))
+      }
+      
+      # acceptance probability calculation 
+      alpha <- log_dist(theta_tilde, mu, sigma)[1,1] + 
+        (.5 * (t(r_tilde) %*% r_tilde)[1,1]) -
+        log_dist(theta, mu, sigma)[1,1] - 
+        (.5 * (t(r) %*% r)[1,1])
+      
+      # determine sample acceptance or rejection 
+      if (alpha > 0) {
+        theta <- theta_tilde
+        accepts[iter] = 1
+      }
+      else {
+        u <- log(runif(1))
+        if (u < alpha) {
+          theta <- theta_tilde
+          accepts[iter] = 1
+        }
+      }
+      samps[iter,] <- theta ## theta_t here
+    }
+    
+    # remove burn-in values 
+    if (burnin > 0) {
+      samps <- samps[-(1:burnin),]
+      accepts <- accepts[-(1:burnin)]
+    }
+    
+    return(list(samps = samps, accepts = accepts))
+  }
+```
+
+The HMC algorithm implemented above is used in the code below to generate 1000 samples for later reference. Parameters are not perfectly tuned; generating samples with these parameters will result in slightly higher acceptance rates than usually desired.  
+
+```{r HMC SAMPLER IMPLEMENTATION}
+hmc_sample <- hamiltonian_mc(M = 1000, burnin = 1000, theta_0 = rep(0, 10),
+                  mass_matrix = diag(10), L = 150, eps = .05, 
+                  mu = mu, sigma = sigma, d = 10)
+apply(hmc_sample$samps, 2, mean)
+sum(hmc_sample$accepts)
+```
+
+#### Example 4: No-U-Turn-Sampler (Section 5.2)
+
+Code below defines two generic versions of the leapfrog integrator. The first version (`leapfrog`) is used in the NUTS algorithm. The second version (`leapfrog2`) is unused in this report, but includes a scalar multiplication step used for HMC and HMC extensions where momentum $r$ sampled from a multivariate normal with non-identity covariance matrix $M$. 
+
+```{r LEAPFROG, warning = FALSE, message = FALSE}
+leapfrog <- function(theta, r, epsilon) {
+  r_tilde <- r + (epsilon / 2) * grad_log(theta)
+  theta_tilde <- theta + (epsilon * r_tilde) 
+  r_tilde <- r_tilde + (epsilon / 2) * grad_log(theta_tilde)
+  return(list(theta_tilde, r_tilde))
+}
+```
+
+```{r LEAPFROG2, warning = FALSE, message = FALSE}
+leapfrog2 <- function(theta, r, epsilon, mass_matrix) {
+  r_tilde <- r + ((epsilon / 2) * grad_log(theta, mu, sigma))
+  theta_tilde <- theta + (epsilon * solve(mass_matrix) %*% r_tilde)
+  r_tilde <- r_tilde + ((epsilon / 2) * grad_log(theta_tilde, mu, sigma))
+  return(list(theta_tilde, r_tilde))
+}
+```
+
+The BuildTree helper for Naive NUTS is shown below. delta_max is a constant used to prevent infinite recursion if step-size or the target distribution are poorly chosen. The value can be set arbitrarily, but selecting something too low may result in poor performance. 
+
+```{r BUILDTREE }
+delta_max = 1000 
+
+build_tree <- function(theta, r, u, v, j, epsilon) {
+  if (j == 0) {
+    
+    # base case single leapfrog step in direction of v 
+    
+    single_step <- leapfrog(theta, r, v*epsilon)
+    theta_prime <- single_step[[1]]
+    r_prime <- single_step[[2]]
+    C_prime <- c()
+    
+    if (u <= exp(log_dist(theta_prime) - (0.5 * (t(r_prime) %*% r_prime)))) {
+      C_prime <- list(cbind(theta_prime, r))
+    }
+    
+    s_prime <- as.numeric(log_dist(theta_prime) - (0.5 * (t(r_prime) %*% r_prime))
+                          > log(u) - delta_max)
+    return(list(theta_prime, r_prime, theta_prime, r_prime, C_prime, s_prime))
+  }
+  else {
+    # recursive step  
+    
+    recur_tree <- build_tree(theta, r, u, v, j - 1, epsilon)
+    theta_minus <- recur_tree[[1]]
+    r_minus <- recur_tree[[2]]
+    theta_plus <- recur_tree[[3]]
+    r_plus <- recur_tree[[4]]
+    C_prime <- recur_tree[[5]]
+    s_prime <- recur_tree[[6]]
+    
+    if (v == -1) {
+      new_branch <- build_tree(theta_minus, r_minus, u, v, j - 1, epsilon)
+      theta_minus <- new_branch[[1]]
+      r_minus <- new_branch[[2]]
+      C_double_prime <- new_branch[[5]]
+      s_double_prime <- new_branch[[6]]
+    }
+    else {
+      new_branch <- build_tree(theta_plus, r_plus, u, v, j - 1, epsilon)
+      theta_plus <- new_branch[[3]]
+      r_plus <- new_branch[[4]]
+      c_double_prime <- new_branch[[5]]
+      s_double_prime <- new_branch[[6]]
+    }
+    # end if else block 
+    
+    t_diff <- theta_plus - theta_minus
+    ind_plus <- as.numeric(t(t_diff) %*% r_plus >= 0)
+    ind_minus <- as.numeric(t(t_diff) %*% r_minus >= 0)
+    s_prime <- s_prime * s_double_prime * ind_plus * ind_minus
+    C_prime <- union(C_prime, C_double_prime)
+    
+    return(list(theta_minus, r_minus, theta_plus, r_plus, C_prime, s_prime))
+  }
+}
+```
+
+The Naive NUTS (Gelman, Hoffman algorithm 2) is implemented below for sampling from a 10-dimensional multivariate normal distribution with randomly generated covariance matrix. 
+
+```{r NAIVE NUTS IMPLEMENTATION}
+naive_NUTS <- function(theta_0, epsilon, M, d = 10) {
+  
+  samples <- matrix(numeric(d*M), nrow = M, ncol = d)
+  theta <- theta_0 
+  
+  for (m in seq(1,M)) { 
+    
+    # initializations
+    r_0 <- rnorm(d)
+    u <- runif(1, 0, exp(log_dist(theta) - (0.5*(t(r_0) %*% r_0))))
+    theta_minus <- theta
+    theta_plus <- theta 
+    r_minus <- r_0
+    r_plus <- r_0 
+    j = 0
+    C = list(cbind(theta, r_0))
+    s <- 1
+    
+    while (s == 1) {
+      v_j <- sign(runif(1,-1,1))
+      
+      if (v_j == -1) {
+        new_tree <- build_tree(theta_minus, r_minus, u, v_j, j, epsilon)
+        theta_minus <- new_tree[[1]]
+        r_minus <- new_tree[[2]]
+        C_prime <- new_tree[[5]]
+        s_prime <- new_tree[[6]]
+      }
+      else {
+        new_tree <- build_tree(theta_plus, r_plus, u, v_j, j, epsilon)
+        theta_plus <- new_tree[[3]]
+        r_plus <- new_tree[[4]]
+        C_prime <- new_tree[[5]]
+        s_prime <- new_tree[[6]]
+      }
+      # END IF 
+      if (s_prime ==1) {
+        C <- union(C, C_prime)
+      }
+      # END IF 
+      t_diff <- theta_plus - theta_minus 
+      ind_plus <- as.numeric(t(t_diff) %*% r_plus >= 0)
+      ind_minus <- as.numeric(t(t_diff) %*% r_minus >= 0)
+      s <- s_prime * ind_plus * ind_minus
+      j <- j + 1
+    }
+    generated <- sample(C, 1)
+    theta <- generated[[1]][,1]
+    samples[m,] <- theta
+  }
+  return(samples)
+}
+```
+
+The Naive NUTS algorithm above is used to generate 1000 samples for later use. A starting value of $\theta_0 = \boldsymbol{0}$ and step-size $\epsilon = 0.013$ are used. Note that 1200 samples are intially generated and the first 200 are burned. 
+
+```{r NAIVE NUTS SAMPLES, warning = FALSE, message = FALSE}
+theta <- rep(0, 10)
+epsilon <- 0.013 
+
+samp <- naive_NUTS(theta, epsilon, 1200)
+samp.burned <- samp[-c(1:200),]
+samp_NUTS <- as.data.frame(samp.burned)
+```
+
+#### Example 5: Optimized Implementation With RStan (Section 5.4)
+
+Code below generates 1000 10-dimensional multivariate normal samples using the optimized implementation of NUTS with dual averaging in RStan. Note that to run this code, the "mtv_norm.stan" file included with this report must be in the working directory. 
+
+```{r STAN OPTIMIZED IMPLEMENTATION}
+# Compile our Stan model
+stan_model <- rstan :: stan_model("mtv_norm.stan")
+
+# Run Stan with one chain. Warmup of 1000 and sample size of 1000
+stan_results <- rstan::sampling(stan_model, 
+                           data = list(N = dimensions, mu = mu, sigma = sigma), 
+                           chains = 1, warmup = 1000, iter = 2000, algorithm = "NUTS", refresh = 0)
+
+sampler_params <- rstan::get_sampler_params(stan_results, inc_warmup = FALSE)
+
+sampler_params_chain1 <- sampler_params[[1]]
+
+# Extract our Stan samples  
+stan_samples <- rstan::extract(stan_results)
+
+apply(stan_samples$y, 2, mean)
+
+```
+
+#### Additional Code: Generic Plotting  
+
+Samples from previous sections are used to generate various plots. This code utilizes the `patchwork` library for arranging results. We include a plot comparing our Naive NUTS samples against the RStan optimized NUTS samples. Other plots are included within the main report document. 
+
+```{r PLOTTING RESULTS }
+stan_plot <- ggplot(data.frame(stan_samples$y), aes(x = X1, y = X10)) + 
+  geom_point() + 
+  geom_density2d() +
+  geom_hline(yintercept = 5, col = "red", lty = 2) +
+  geom_vline(xintercept = 5,col = "red", lty = 2) +
+  theme_classic() + 
+  labs(title = "Stan - Sample Size 1,000")
+
+NUTS_plot <- ggplot(data = samp_NUTS, mapping = aes(x = V1, y = V10)) + 
+  geom_point() + 
+  geom_density2d() +
+  geom_hline(yintercept = 5, col = "red", lty = 2) +
+  geom_vline(xintercept = 5,col = "red", lty = 2) + 
+  theme_classic() + 
+  labs(title = "NUTS - Sample Size 1,000", x = "X1", y = "X10")
+
+HMC_plot <- ggplot(data.frame(hmc_sample$samps), aes(x = X1, y = X10)) + 
+  geom_point()  + 
+  geom_density2d() + 
+  geom_hline(yintercept = 5, col = "red", lty = 2) +
+  geom_vline(xintercept = 5,col = "red", lty = 2) + 
+  theme_classic() + 
+  labs(title = "HMC - Sample Size 1,000")
+
+(NUTS_plot | stan_plot)
+```
+
